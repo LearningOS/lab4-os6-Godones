@@ -209,3 +209,135 @@ impl Inode {
         block_cache_sync_all();
     }
 }
+
+impl Inode {
+    /// 查看文件inode编号
+    pub fn get_disk_inode(&self)->usize{
+        let fs = self.fs.lock();
+        fs.get_disk_inode(self.block_id as u32,self.block_offset) as usize
+    }
+    pub fn find_inode(&self,name:&str)->Option<Arc<Inode>>{
+        //根据名称找到文件索引节点号
+        let fs = self.fs.lock();//尝试获得文件系统的互斥锁
+        self.read_disk_inode(|disk_inode|{
+            self.find_inode_id(name,disk_inode).map(|inode_id|{
+                let(block_id,block_offset) = fs.get_disk_inode_pos(inode_id);
+                // println!("the inode id: {}, The block_id :{}, block_offset :{}",inode_id,block_id,block_offset);
+                Arc::new(
+                    Inode::new(
+                        block_id,
+                        block_offset,
+                        self.fs.clone(),
+                        self.block_device.clone(),
+                    )
+                )
+            })
+        })
+    }
+    pub fn create_nlink(&self,newname:&str,oldname:&str)->Option<Arc<Inode>>{
+        //创建一个硬链接文件
+        if self.modify_disk_inode(|root_node:&mut DiskInode|{
+            //查找是否已经存在此节点
+            assert!(root_node.is_dir(),"The root node is not directory");
+            self.find_inode_id(newname,root_node)//在根目录下查找
+        }).is_some(){
+            return None//存在文件
+        }
+        //新建一个文件
+        let old_inode = self.find_inode(oldname).unwrap();
+        let (inode_block_id,inode_block_offset) = (old_inode.block_id,old_inode.block_offset);
+        self.modify_disk_inode(|root_inode|{
+            //在根目录下添加
+            let file_num = root_inode.size as usize/DIRENT_SZ;
+            let new_size = (file_num+1)*DIRENT_SZ;//新的目录大小
+
+            let new_entry = DirEntry::new(newname, old_inode.get_disk_inode()as u32);
+            let mut fs = self.fs.lock();
+            self.increase_size(new_size as u32,root_inode,&mut fs);
+
+            let _number = root_inode.write_at(
+                file_num*DIRENT_SZ as usize,
+                new_entry.as_bytes(),
+                &self.block_device,
+            );//写入目录项
+        });
+        let new_inode = Inode::new(
+            inode_block_id as u32,
+            inode_block_offset,
+            self.fs.clone(),
+            self.block_device.clone()
+        );
+        new_inode.add_disk_nlink();//添加硬链接
+        Some(Arc::new(new_inode))
+    }
+    pub fn delete_nlink(&self,path:&str)->isize{
+        //只需要找到文件inode并且将其换成一个空白文件即可
+        let inode = self.find_inode(path).unwrap();//找到文件inode
+        //需要从目录下删除文件并减少文件的硬链接计数
+        inode.sub_disk_nlink();
+        if inode.get_disk_nlink()==0 {
+            inode.clear();
+            self.delete_file(path);
+        }
+        0
+    }
+
+    pub fn get_disk_nlink(&self)->u32{
+        self.read_disk_inode(|disknode|{
+            disknode.nlink
+        })
+    }
+
+    pub fn add_disk_nlink(&self){
+        self.modify_disk_inode(|disknode|{
+            disknode.nlink +=1;
+        })
+    }
+    pub fn sub_disk_nlink(&self){
+        self.modify_disk_inode(|disknode|{
+            disknode.nlink -=1;
+        })
+    }
+    ///查看文件大小
+    pub fn get_file_size(&self)->usize{
+        self.read_disk_inode(|disk_node|{
+            disk_node.size as usize
+        })
+    }
+    ///查看文件类型
+    pub fn get_disk_type(&self)->u32{
+        self.read_disk_inode(|disknode|{
+            if disknode.is_dir(){
+                0o040000
+            }
+            else {
+                0o100000
+            }
+        })
+    }
+    pub fn delete_file(&self,path:&str)->isize{
+        //删除文件
+        self.modify_disk_inode(|root_inode| {
+            // append file in the dirent
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            // 找到对应的目录项
+            for index in 0..file_count {
+                let mut entry = DirEntry::empty();
+                root_inode.read_at(
+                    index * DIRENT_SZ as usize,
+                    entry.as_bytes_mut(),
+                    &self.block_device,
+                );
+                if entry.name() == path {
+                    // 删除目录项
+                    root_inode.write_at(
+                        index * DIRENT_SZ as usize,
+                        DirEntry::empty().as_bytes(),
+                        &self.block_device,
+                    );
+                }
+            }
+        });
+        0
+    }
+}
