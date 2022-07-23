@@ -23,6 +23,7 @@ pub fn main() -> i32 {
         close(fd);
         assert_eq!(unlink(fname), 0);
         let fd = open(fname, OpenFlags::RDONLY);
+        // println!("fd: {}", fd);
         assert!(fd < 0);
         println!("test iteration {}", i)
     }

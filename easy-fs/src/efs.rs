@@ -162,3 +162,11 @@ impl EasyFileSystem {
         )
     }
 }
+impl EasyFileSystem {
+    ///将索引块号与块内偏移转化为inode编号
+    pub fn get_disk_inode(&self,block_id:u32,offset:usize)->u32{
+        let per_block_disknode = BLOCK_SZ/core::mem::size_of::<DiskInode>();
+        let inode = (block_id - self.inode_area_start_block)*per_block_disknode as u32 + offset as u32;
+        inode
+    }
+}
